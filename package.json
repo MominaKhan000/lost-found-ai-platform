@@ -8,10 +8,13 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "check": "node --check src/server.js && node --check src/services/matching.js && node --check src/services/vision.js && node --check public/app.js"
+    "check": "node --check src/server.js && node --check src/services/matching.js && node --check src/services/vision.js && node --check src/services/social.js && node --check src/services/visual-finder.js && node --check public/app.js"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
+    "@techstark/opencv-js": "^4.12.0-release.1",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
     "dotenv": "^16.4.7",

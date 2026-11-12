@@ -46,6 +46,7 @@
       <a class="brand" href="#"><span class="brand-mark">R</span> Recoverly</a>
       <nav class="main-nav" aria-label="Main navigation">
         <button class="nav-link active" data-view="browse"><span>⌕</span> Browse</button>
+        <button class="nav-link" data-view="map"><span>◎</span> Map &amp; social</button>
         <button class="nav-link" data-view="report-lost"><span>↘</span> Report lost</button>
         <button class="nav-link" data-view="report-found"><span>↗</span> Report found</button>
         <button class="nav-link" data-view="visual"><span>◉</span> Image search</button>
@@ -88,16 +89,63 @@
         <section id="report-foundView" class="view hidden"><div class="section-heading"><p class="eyebrow">CREATE REPORT</p><h2>Report a found item</h2><p class="muted">Keep exact identifying details private until the owner can verify them.</p></div><div id="foundFormMount"></div></section>
 
         <section id="visualView" class="view hidden">
-          <div class="section-heading"><p class="eyebrow">COMPUTER VISION</p><h2>Search with an image</h2><p class="muted">A private perceptual hash compares the image you upload to report photos. Your search photo is not saved.</p></div>
+          <div class="section-heading"><p class="eyebrow">COMPUTER VISION</p><h2>Search with an image</h2><p class="muted">Choose how you want to search: compare with report photos, or let the AI Visual Finder locate your item inside a crowded photo.</p></div>
+          <div class="segmented mode-switch" role="tablist" aria-label="Image search mode"><button type="button" class="active" data-visual-mode="similar">Similar report photos</button><button type="button" data-visual-mode="crowd">AI Visual Finder · crowded photo</button></div>
+          <div id="similarPanel">
           <form id="visualForm" class="visual-form"><label class="drop-zone">📷 <strong>Choose a clear image of the item</strong><small>JPEG, PNG, or WebP — up to 5 MB</small><input name="image" type="file" accept="image/jpeg,image/png,image/webp" required></label><label>Limit to a category<select id="visualCategory" name="category"><option value="">All categories</option></select></label><button class="button primary" type="submit">Find similar items</button></form>
           <div id="visualResults" class="card-grid results-space"></div>
+          </div>
+
+          <div id="crowdPanel" class="hidden">
+            <div class="section-heading compact"><p class="muted">Upload a photo of the crowded area where you think your item is, plus a clear photo of the item itself. The AI looks for the same object inside the crowd, highlights it, and gives a confidence score. Photos are processed in memory and are not stored.</p></div>
+            <form id="crowdForm" class="visual-form crowd-form">
+              <label class="drop-zone">🏙️ <strong>Crowded area photo</strong><small>Where you think the item is</small><input name="scene" type="file" accept="image/jpeg,image/png,image/webp" required><img id="scenePreview" class="preview hidden" alt="Crowded area preview"></label>
+              <label class="drop-zone">👜 <strong>Reference photo of your item</strong><small>Plain background works best</small><input name="reference" type="file" accept="image/jpeg,image/png,image/webp" required><img id="referencePreview" class="preview hidden" alt="Reference item preview"></label>
+              <button class="button primary" type="submit">Run AI Visual Finder</button>
+            </form>
+            <div id="crowdResults" class="results-space"></div>
+          </div>
         </section>
 
         <section id="assistantView" class="view hidden">
-          <div class="assistant-layout"><div class="assistant-intro"><p class="eyebrow">RECOVERLY ASSISTANT</p><h2>Describe what happened.</h2><p>Ask naturally. The agent extracts meaningful details, ranks relevant database reports, and explains the result.</p><div class="prompt-chips"><button data-prompt="I lost my black leather wallet near the university.">Black wallet near university</button><button data-prompt="Has anyone found a blue student ID around the library?">Blue student ID at library</button></div></div><div class="chat-card"><div id="assistantMessages" class="assistant-messages"><div class="assistant-message bot">Hi! Tell me what you lost or found, including color, location, and any distinctive features.</div></div><form id="assistantForm" class="assistant-input"><input name="question" placeholder="I lost my…" required><button class="button primary">Ask</button></form></div></div>
+          <div class="assistant-layout"><div class="assistant-intro"><p class="eyebrow">RECOVERLY ASSISTANT</p><h2>Describe what happened.</h2><p>Ask naturally. The agent extracts meaningful details, searches real reports within 2 km of where you are, and explains the result.</p><div class="assistant-location"><button id="assistantLocate" type="button" class="button secondary">⌖ Use my location</button><span id="assistantLocationStatus" class="muted tiny">Not shared yet — results will be citywide.</span></div><div class="prompt-chips"><button data-prompt="I lost my black leather wallet near the university.">Black wallet near university</button><button data-prompt="Has anyone found a blue student ID around the library?">Blue student ID at library</button></div></div><div class="chat-card"><div id="assistantMessages" class="assistant-messages"><div class="assistant-message bot">Hi! Tell me what you lost or found, including color, location, and any distinctive features.</div></div><form id="assistantForm" class="assistant-input"><input name="question" placeholder="I lost my…" required><button class="button primary">Ask</button></form></div></div>
         </section>
 
         <section id="messagesView" class="view hidden"><div class="section-heading"><p class="eyebrow">PRIVATE CHAT</p><h2>Conversations</h2><p class="muted">Use chat to verify ownership without exposing phone numbers publicly.</p></div><div class="messages-layout"><div id="conversationList" class="conversation-list"></div><div id="messagePane" class="message-pane empty-pane">Select a conversation to view messages.</div></div></section>
+
+        <section id="mapView" class="view hidden">
+          <div class="section-heading"><p class="eyebrow">MAP &amp; DISCOVERY</p><h2>Explore lost and found items on the map</h2><p class="muted">Every located report from all users appears here. Public Instagram and Facebook posts are shown separately.</p></div>
+          <div class="segmented" role="tablist" aria-label="Map mode"><button type="button" class="active" data-map-tab="reports">Reports map</button><button type="button" data-map-tab="social">Instagram &amp; Facebook</button></div>
+
+          <div id="mapReportsPanel">
+            <div class="map-legend" aria-label="Map legend">
+              <span><i class="legend-pin lost"></i> Lost item (original location)</span>
+              <span><i class="legend-pin found"></i> Found item (original location)</span>
+              <span><i class="legend-pin collection"></i> Collection point</span>
+              <strong id="mapCount" class="muted tiny"></strong>
+            </div>
+            <div id="reportsMap" class="google-map" role="region" aria-label="Map of lost and found reports"></div>
+            <p id="mapStatus" class="muted tiny"></p>
+          </div>
+
+          <div id="mapSocialPanel" class="hidden">
+            <div class="social-controls">
+              <div class="segmented" role="tablist" aria-label="Platform"><button type="button" class="active" data-platform="instagram">Instagram</button><button type="button" data-platform="facebook">Facebook</button></div>
+              <div class="form-grid social-grid">
+                <label>Area name <small>needed for Instagram</small><input id="socialAreaName" maxlength="120" placeholder="e.g. Blue Area, Islamabad"></label>
+                <label>Radius<select id="socialRadius"><option value="2">2 km</option><option value="5">5 km</option><option value="10">10 km</option></select></label>
+                <label>What are you looking for? <small>optional</small><input id="socialQuery" maxlength="160" placeholder="wallet, keys, student ID"></label>
+                <label>Latitude<input id="socialLatitude" type="number" step="0.000001" min="-90" max="90" placeholder="Click the map or type"></label>
+                <label>Longitude<input id="socialLongitude" type="number" step="0.000001" min="-180" max="180" placeholder="Click the map or type"></label>
+              </div>
+              <div class="picker-actions"><button id="socialLocate" type="button" class="button secondary">⌖ Use my location</button><button id="socialSearchButton" type="button" class="button primary">Search this area</button></div>
+              <p id="socialAreaNote" class="muted tiny">Pick an area on the map. Only posts within the selected radius are shown.</p>
+            </div>
+            <div id="socialMap" class="google-map small" role="region" aria-label="Choose the search area"></div>
+            <div id="discoverLimitation" class="notice hidden"></div>
+            <div id="discoverResults" class="social-list"></div>
+          </div>
+        </section>
 
         <section id="reportsView" class="view hidden"><div class="section-heading inline-heading"><div><p class="eyebrow">YOUR ACTIVITY</p><h2>My reports</h2></div><button id="editProfileButton" class="button secondary">Edit profile</button></div><div id="profileEditor" class="profile-editor hidden"><form id="profileForm" class="inline-form"><label>Your name<input name="name" required></label><label>Email<input name="email" type="email" required></label><button class="button primary">Save changes</button></form></div><div id="myReports" class="card-grid"></div></section>
       </div>
@@ -105,7 +153,7 @@
   </div>
 
   <dialog id="detailDialog" class="dialog"><button id="closeDialog" class="dialog-close" aria-label="Close">×</button><div id="detailContent"></div></dialog>
-  <template id="reportTemplate"><form class="report-form"><div class="form-grid"><label>Item name<input name="title" maxlength="140" placeholder="e.g. Black leather wallet" required></label><label>Category<select name="category" class="category-select" required></select></label><label>Color<input name="color" maxlength="80" placeholder="e.g. Black"></label><label>Keywords <small>comma-separated</small><input name="keywords" placeholder="leather, cards, initials"></label><label class="wide">Description<textarea name="description" maxlength="3000" placeholder="Describe distinctive marks, contents, or condition."></textarea></label><label>Location / landmark<input name="locationName" maxlength="180" placeholder="e.g. Main library entrance" required></label><label>Date and time <small>optional</small><input name="occurredAt" type="datetime-local"></label><label>Latitude <small>optional</small><input name="latitude" type="number" step="0.000001" min="-90" max="90" placeholder="33.6844"></label><label>Longitude <small>optional</small><input name="longitude" type="number" step="0.000001" min="-180" max="180" placeholder="73.0479"></label><label class="wide">Photos <small>up to five JPEG, PNG, or WebP images</small><input name="images" type="file" multiple accept="image/jpeg,image/png,image/webp"></label><label class="wide found-only">WhatsApp number <small>optional — visible only to you; use built-in chat to connect</small><input name="whatsapp" maxlength="30" placeholder="+92…"></label></div><div class="form-footer"><p class="muted tiny">By posting, you confirm the details are accurate and safe to share.</p><button class="button primary" type="submit">Publish report</button></div></form></template>
+  <template id="reportTemplate"><form class="report-form"><div class="form-grid"><label>Item name<input name="title" maxlength="140" placeholder="e.g. Black leather wallet" required></label><label>Category<select name="category" class="category-select" required></select></label><label>Color<input name="color" maxlength="80" placeholder="e.g. Black"></label><label>Keywords <small>comma-separated</small><input name="keywords" placeholder="leather, cards, initials"></label><label class="wide">Description<textarea name="description" maxlength="3000" placeholder="Describe distinctive marks, contents, or condition."></textarea></label><label>Date and time <small>optional</small><input name="occurredAt" type="datetime-local"></label><div class="wide location-mount" data-location-mount="original"></div><div class="wide location-mount" data-location-mount="collection"></div><label class="wide">Photos <small>up to five JPEG, PNG, or WebP images</small><input name="images" type="file" multiple accept="image/jpeg,image/png,image/webp"></label><label class="wide">WhatsApp number <small>optional — in-app chat is always available</small><input name="whatsapp" maxlength="30" placeholder="+92…"></label><label class="wide checkbox-row"><input type="checkbox" name="whatsappVisible" value="true"> Show this WhatsApp number on the report so people can also contact me there</label></div><div class="form-footer"><p class="muted tiny">By posting, you confirm the details are accurate and safe to share.</p><button class="button primary" type="submit">Publish report</button></div></form></template>
   <script src="/app.js"></script>
 </body>
 </html>

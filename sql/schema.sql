@@ -79,3 +79,13 @@ CREATE TABLE IF NOT EXISTS social_search_cache (
   payload JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS social_search_cache_lookup_idx ON social_search_cache(source, query, created_at DESC);
+
+-- Mandatory two-location reporting. latitude/longitude hold the ORIGINAL lost/found location.
+-- The collection location is stored separately. Legacy rows created before this change keep NULLs here.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS collection_location_name VARCHAR(180);
+ALTER TABLE items ADD COLUMN IF NOT EXISTS collection_latitude NUMERIC(9, 6);
+ALTER TABLE items ADD COLUMN IF NOT EXISTS collection_longitude NUMERIC(9, 6);
+-- WhatsApp contact is optional and off by default; the reporter must choose to show the number.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS whatsapp_visible BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS items_coordinates_idx ON items(latitude, longitude);

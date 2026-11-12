@@ -9,9 +9,10 @@ const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const { query, pool, migrate, close } = require("./db");
-const { tokenize, haversine, scoreItems, scoreQuery } = require("./services/matching");
+const { tokenize, haversine, scoreItems, scoreQuery, parseRequest, scoreRequest } = require("./services/matching");
 const { perceptualHash, visualScore } = require("./services/vision");
-const { searchSocial } = require("./services/social");
+const { searchSocial, discoverSocial, discoveryStatus } = require("./services/social");
+const { findItemInScene } = require("./services/visual-finder");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -58,14 +59,23 @@ function numberOrNull(value, min, max) {
   const number = Number(value);
   return Number.isFinite(number) && number >= min && number <= max ? number : null;
 }
+const SEARCH_RADIUS_KM = 2;
+const ACTIVE_STATUSES = ["open", "matched", "claimed"];
+
 function itemForClient(row, viewerId) {
   if (!row) return null;
   const item = { ...row, images: row.images || [] };
   item.primaryImage = item.images[0]?.url || null;
   item.visual_hash = item.images[0]?.visualHash || null;
   delete item.password_hash;
-  if (item.user_id !== viewerId) delete item.whatsapp;
+  // The WhatsApp number is private unless the reporter chose to show it on the report.
+  if (item.user_id !== viewerId && !item.whatsapp_visible) delete item.whatsapp;
   return item;
+}
+function digitsOnly(value) { return String(value || "").replace(/[^\d+]/g, ""); }
+function distanceKm(latitude, longitude, row) {
+  if (row.latitude === null || row.latitude === undefined || row.longitude === null || row.longitude === undefined) return null;
+  return Math.round(haversine(latitude, longitude, Number(row.latitude), Number(row.longitude)) * 100) / 100;
 }
 function signUser(user) {
   return jwt.sign({ id: user.id, name: user.name, email: user.email }, JWT_SECRET, { expiresIn: "7d" });
@@ -183,16 +193,23 @@ app.post("/api/items", requireAuth, upload.array("images", 5), async (req, res, 
     const reportType = cleanString(req.body.reportType, 5).toLowerCase();
     const title = cleanString(req.body.title, 140), category = cleanString(req.body.category, 80), locationName = cleanString(req.body.locationName, 180);
     const description = cleanString(req.body.description, 3000), color = cleanString(req.body.color, 80) || null;
+    // Both locations are mandatory: the original lost/found spot and the agreed collection point, each with coordinates.
     const latitude = numberOrNull(req.body.latitude, -90, 90), longitude = numberOrNull(req.body.longitude, -180, 180);
+    const collectionLocationName = cleanString(req.body.collectionLocationName, 180);
+    const collectionLatitude = numberOrNull(req.body.collectionLatitude, -90, 90), collectionLongitude = numberOrNull(req.body.collectionLongitude, -180, 180);
     const occurredAt = req.body.occurredAt ? new Date(req.body.occurredAt) : null;
-    if (!["lost", "found"].includes(reportType) || !title || !CATEGORIES.includes(category) || !locationName) return res.status(400).json({ error: "Report type, title, category, and location are required." });
+    if (!["lost", "found"].includes(reportType) || !title || !CATEGORIES.includes(category) || !locationName) return res.status(400).json({ error: "Report type, title, category, and original location name are required." });
     if (req.body.occurredAt && Number.isNaN(occurredAt.getTime())) return res.status(400).json({ error: "Enter a valid date and time." });
-    if ((latitude === null) !== (longitude === null)) return res.status(400).json({ error: "Provide both latitude and longitude, or neither." });
+    if (latitude === null || longitude === null) return res.status(400).json({ error: "Select the original lost/found location on the map (latitude and longitude are required)." });
+    if (!collectionLocationName || collectionLatitude === null || collectionLongitude === null) return res.status(400).json({ error: "Select a collection location on the map where the owner and finder will meet." });
+    const whatsapp = digitsOnly(req.body.whatsapp).slice(0, 30);
+    const whatsappVisible = ["true", "on", "1"].includes(String(req.body.whatsappVisible).toLowerCase());
+    if (whatsappVisible && !/^\+?\d{7,15}$/.test(whatsapp)) return res.status(400).json({ error: "Enter a valid WhatsApp number (7–15 digits, with country code) or untick the WhatsApp option." });
     const client = await pool.connect(); let item;
     try {
       await client.query("BEGIN");
-      const { rows } = await client.query(`INSERT INTO items (user_id,report_type,title,description,category,color,keywords,location_name,latitude,longitude,occurred_at,whatsapp)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`, [req.user.id, reportType, title, description, category, color, parseKeywords(req.body.keywords), locationName, latitude, longitude, occurredAt, cleanString(req.body.whatsapp, 30) || null]);
+      const { rows } = await client.query(`INSERT INTO items (user_id,report_type,title,description,category,color,keywords,location_name,latitude,longitude,collection_location_name,collection_latitude,collection_longitude,occurred_at,whatsapp,whatsapp_visible)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`, [req.user.id, reportType, title, description, category, color, parseKeywords(req.body.keywords), locationName, latitude, longitude, collectionLocationName, collectionLatitude, collectionLongitude, occurredAt, whatsapp || null, whatsappVisible && Boolean(whatsapp)]);
       item = rows[0];
       for (const file of uploaded) {
         const visualHash = await perceptualHash(file.path);
@@ -247,16 +264,45 @@ app.post("/api/visual-search", requireAuth, memoryUpload.single("image"), async 
   } catch (error) { next(error); }
 });
 
+// AI Lost Item Assistant: understands the request, searches real reports within 2 km of the user's location,
+// and optionally adds public Instagram/Facebook posts when Meta is configured. It never invents listings.
 app.post("/api/assistant", requireAuth, async (req, res, next) => {
   try {
     const question = cleanString(req.body.question, 500);
     if (question.length < 3) return res.status(400).json({ error: "Ask a little more about the item you need help finding." });
-    const words = tokenize(question);
-    const candidates = await fetchAllItems("WHERE i.status IN ('open','matched')");
-    const matches = candidates.map((item) => ({ ...item, match: scoreQuery(question, item) })).filter((item) => item.match.score >= 18).sort((a, b) => b.match.score - a.match.score).slice(0, 6);
-    const inferredType = /found|find|seen/.test(question.toLowerCase()) ? "found" : "lost";
-    const answer = matches.length ? `I searched ${candidates.length} active reports for “${words.join(", ")}”. These are the ${matches.length} closest ${inferredType === "lost" ? "reports" : "results"}; compare their location, description, and images before contacting the poster.` : "I could not find a strong match yet. Try adding the item type, color, a landmark, and any distinctive marks, or post a report so the platform can notify you about future matches.";
-    res.json({ answer, extractedKeywords: words, matches });
+    const request = parseRequest(question);
+    const latitude = numberOrNull(req.body.latitude, -90, 90), longitude = numberOrNull(req.body.longitude, -180, 180);
+    const hasLocation = latitude !== null && longitude !== null;
+    const params = [request.seeking, ACTIVE_STATUSES];
+    let where = "WHERE i.report_type = $1 AND i.status = ANY($2)";
+    if (hasLocation) {
+      params.push(latitude, longitude, SEARCH_RADIUS_KM);
+      where += ` AND i.latitude IS NOT NULL AND i.longitude IS NOT NULL AND 6371 * acos(LEAST(1, GREATEST(-1, cos(radians($3)) * cos(radians(i.latitude)) * cos(radians(i.longitude) - radians($4)) + sin(radians($3)) * sin(radians(i.latitude))))) <= $5`;
+    }
+    // A person's own reports are never suggested back to them.
+    params.push(req.user.id);
+    where += ` AND i.user_id <> $${params.length}`;
+    const candidates = await fetchAllItems(where, params);
+    const matches = candidates
+      .map((item) => ({ ...item, match: scoreRequest(request, item), distanceKm: hasLocation ? distanceKm(latitude, longitude, item) : null }))
+      .filter((item) => item.match && item.match.score >= 25)
+      .sort((a, b) => b.match.score - a.match.score || (a.distanceKm ?? 0) - (b.distanceKm ?? 0))
+      .slice(0, 8);
+    const kind = request.seeking === "found" ? "found" : "lost";
+    const scopeText = hasLocation ? `within ${SEARCH_RADIUS_KM} km of your location` : "citywide (share your location to limit the search to 2 km)";
+    const understood = [request.categories.length ? `category: ${request.categories.join(", ")}` : null, request.colors.length ? `colour: ${request.colors.join(", ")}` : null, request.keywords.length ? `details: ${request.keywords.slice(0, 6).join(", ")}` : null].filter(Boolean);
+    const answer = matches.length
+      ? `I searched ${candidates.length} active ${kind} reports ${scopeText} and found ${matches.length} possible ${matches.length === 1 ? "match" : "matches"}${understood.length ? ` (${understood.join("; ")})` : ""}. Compare the photos, descriptions, and both locations, then message the person to verify before arranging a collection.`
+      : `I searched ${candidates.length} active ${kind} reports ${scopeText} and found no strong match${understood.length ? ` for ${understood.join("; ")}` : ""}. Try adding a colour, a brand, a landmark, or distinctive marks. You can also post a report so you are notified when a match appears.`;
+    // Optional public social results: only when Meta is configured and a location is available.
+    let social = { configured: discoveryStatus().facebook.configured, results: [] };
+    if (hasLocation && discoveryStatus().facebook.configured) {
+      try {
+        const result = await discoverSocial({ platform: "facebook", latitude, longitude, radiusKm: SEARCH_RADIUS_KM, query: request.keywords.join(" ") || request.categories.join(" "), areaName: "" });
+        social = { configured: true, results: result.results, limitation: result.limitation };
+      } catch (error) { social = { configured: true, results: [], limitation: `Facebook search unavailable: ${error.message}` }; }
+    }
+    res.json({ answer, understood: { type: kind, categories: request.categories, colors: request.colors, keywords: request.keywords, radiusKm: hasLocation ? SEARCH_RADIUS_KM : null, locationUsed: hasLocation, searchedCount: candidates.length }, extractedKeywords: request.keywords, matches, social });
   } catch (error) { next(error); }
 });
 
@@ -285,10 +331,17 @@ app.get("/api/conversations", requireAuth, async (req, res, next) => {
 });
 app.get("/api/conversations/:id/messages", requireAuth, async (req, res, next) => {
   try {
-    const { rows: allowed } = await query("SELECT id FROM conversations WHERE id=$1 AND (owner_id=$2 OR requester_id=$2)", [req.params.id, req.user.id]);
-    if (!allowed[0]) return res.status(404).json({ error: "Conversation not found." });
+    const { rows: found } = await query(`SELECT c.id, c.item_id, c.owner_id, c.requester_id, i.title AS item_title, i.report_type, i.status AS item_status,
+        owner.name AS owner_name, requester.name AS requester_name
+      FROM conversations c JOIN items i ON i.id=c.item_id JOIN users owner ON owner.id=c.owner_id JOIN users requester ON requester.id=c.requester_id
+      WHERE c.id=$1 AND (c.owner_id=$2 OR c.requester_id=$2)`, [req.params.id, req.user.id]);
+    if (!found[0]) return res.status(404).json({ error: "Conversation not found." });
+    const c = found[0];
+    const viewerIsOwner = c.owner_id === req.user.id;
+    // Sender and receiver details for the chat header. Contact details are never included.
+    const conversation = { id: c.id, itemId: c.item_id, itemTitle: c.item_title, reportType: c.report_type, itemStatus: c.item_status, ownerId: c.owner_id, ownerName: c.owner_name, requesterId: c.requester_id, requesterName: c.requester_name, viewerRole: viewerIsOwner ? "owner" : "requester", counterpartName: viewerIsOwner ? c.requester_name : c.owner_name };
     const { rows } = await query(`SELECT m.*, u.name AS sender_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.conversation_id=$1 ORDER BY m.created_at`, [req.params.id]);
-    res.json({ messages: rows });
+    res.json({ conversation, messages: rows });
   } catch (error) { next(error); }
 });
 app.post("/api/conversations/:id/messages", requireAuth, async (req, res, next) => {
@@ -320,6 +373,68 @@ app.post("/api/social/search", requireAuth, async (req, res, next) => {
     res.json(result);
   } catch (error) { next(error); }
 });
+// Public client configuration. Only the browser-restricted Google Maps key is shared; Meta tokens never leave the server.
+app.get("/api/config", (req, res) => {
+  const social = discoveryStatus();
+  res.json({
+    googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || null,
+    searchRadiusKm: SEARCH_RADIUS_KM,
+    social: { instagram: { configured: social.instagram.configured, geoBasis: social.instagram.geoBasis }, facebook: { configured: social.facebook.configured, geoBasis: social.facebook.geoBasis } },
+  });
+});
+
+// Every report with coordinates, for the shared Google Map. No contact details are included.
+app.get("/api/map/items", async (req, res, next) => {
+  try {
+    const { rows } = await query(`SELECT i.id, i.title, i.report_type, i.category, i.color, i.status, i.location_name, i.latitude, i.longitude,
+        i.collection_location_name, i.collection_latitude, i.collection_longitude, i.created_at,
+        (SELECT storage_path FROM item_images WHERE item_id=i.id ORDER BY created_at LIMIT 1) AS image
+      FROM items i WHERE i.latitude IS NOT NULL AND i.longitude IS NOT NULL ORDER BY i.created_at DESC LIMIT 1000`);
+    res.json({ items: rows });
+  } catch (error) { next(error); }
+});
+
+// AI Visual Finder: locates a reference item inside a crowded-area photo (see services/visual-finder.js).
+// Uploaded photos are processed in memory and are not stored.
+const finderUpload = memoryUpload.fields([{ name: "scene", maxCount: 1 }, { name: "reference", maxCount: 1 }]);
+app.post("/api/visual-finder", requireAuth, finderUpload, async (req, res, next) => {
+  try {
+    const scene = req.files?.scene?.[0], reference = req.files?.reference?.[0];
+    if (!scene || !reference) return res.status(400).json({ error: "Upload both the crowded-area photo and a reference photo of your item." });
+    let result;
+    try {
+      result = await findItemInScene(scene.buffer, reference.buffer);
+    } catch (error) {
+      if (/did not initialise/.test(error.message)) return res.status(503).json({ error: "The visual analysis engine did not start. Please try again." });
+      if (/unsupported image|input buffer|bad extract|Input file/i.test(error.message)) return res.status(400).json({ error: "We could not read one of the photos. Upload a clear JPEG, PNG, or WebP image." });
+      throw error;
+    }
+    res.json({ ...result, note: result.found ? "Matches are candidates from image analysis. Confirm by looking at the highlighted photo before you contact anyone." : "No suitable match was detected. Try a sharper photo of the item, a closer crowd photo, or a reference photo with the item against a plain background." });
+  } catch (error) { next(error); }
+});
+
+// Area-based Instagram / Facebook discovery. Results are cached for 30 minutes to respect Meta rate limits.
+app.post("/api/social/discover", requireAuth, async (req, res, next) => {
+  try {
+    const platform = cleanString(req.body.platform, 12).toLowerCase();
+    if (!["instagram", "facebook"].includes(platform)) return res.status(400).json({ error: "Choose Instagram or Facebook." });
+    const latitude = numberOrNull(req.body.latitude, -90, 90), longitude = numberOrNull(req.body.longitude, -180, 180);
+    const radiusKm = Math.min(Math.max(Number(req.body.radiusKm) || SEARCH_RADIUS_KM, 0.5), 10);
+    const areaName = cleanString(req.body.areaName, 120), queryText = cleanString(req.body.query, 160);
+    if (latitude === null || longitude === null) return res.status(400).json({ error: "Select an area on the map first." });
+    const cacheKey = JSON.stringify({ platform, latitude: latitude.toFixed(3), longitude: longitude.toFixed(3), radiusKm, areaName: areaName.toLowerCase(), queryText: queryText.toLowerCase() });
+    const { rows: cached } = await query("SELECT payload FROM social_search_cache WHERE source=$1 AND query=$2 AND created_at > now() - interval '30 minutes' ORDER BY created_at DESC LIMIT 1", [`discover-${platform}`, cacheKey]);
+    if (cached[0]) return res.json({ ...cached[0].payload, cached: true });
+    const result = await discoverSocial({ platform, latitude, longitude, radiusKm, areaName, query: queryText });
+    const payload = { ...result, area: { latitude, longitude, radiusKm, areaName: areaName || null }, disclaimer: "These posts come from Meta's platform, not from Recoverly's own listings. Open the original post to verify it." };
+    if (!result.errors?.length) await query("INSERT INTO social_search_cache (source,query,payload) VALUES ($1,$2,$3)", [`discover-${platform}`, cacheKey, JSON.stringify(payload)]);
+    res.json(payload);
+  } catch (error) {
+    if (/Meta Graph API returned/.test(error.message)) return res.status(502).json({ error: `${error.message}. Check the Meta app token, permissions, and app review status.` });
+    next(error);
+  }
+});
+
 app.get("/api/stats", async (req, res, next) => {
   try {
     const { rows } = await query(`SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE report_type='lost')::int AS lost, COUNT(*) FILTER (WHERE report_type='found')::int AS found, COUNT(*) FILTER (WHERE status='returned')::int AS returned FROM items`);
