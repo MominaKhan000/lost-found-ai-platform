@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Recoverly — AI-Powered Lost & Found Platform
 
 Recoverly is a complete full-stack starter for an intelligent lost-and-found service. It uses **Neon PostgreSQL** for persistent cloud data and provides a responsive web experience for reporting, searching, matching, and privately messaging about belongings.
@@ -130,3 +131,8 @@ lost-found-ai-platform/
 | Chat and notifications | `POST/GET /api/conversations`, `GET/POST /api/conversations/:id/messages`, `GET /api/notifications` |
 | Integrations | `POST /api/social/search`, `POST /api/social/discover`, `GET /api/stats`, `GET /api/categories`, `GET /api/config` |
 | Map and visual finder | `GET /api/map/items`, `POST /api/visual-finder` |
+=======
+# lost-found-AI-platform
+>>>>>>> 7b77d30b481a1cc4fa6dd4f070a2214fa21d42e3
+#   l o s t - f o u n d - A I - p l a t f o r m  
+ 
